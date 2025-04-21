@@ -1,0 +1,183 @@
+// == 在浏览器控制台运行的完整代码 ==
+
+// 1. 初始化数据库
+const dbName = '2';
+const storeName = 'danmus';
+let db;
+
+const request = indexedDB.open(dbName, 1);
+request.onupgradeneeded = function(event) {
+  db = event.target.result;
+  if (!db.objectStoreNames.contains(storeName)) {
+    const store = db.createObjectStore(storeName, { keyPath: 'id', autoIncrement: true });
+    store.createIndex('time', 'time', { unique: false });
+  }
+};
+
+request.onsuccess = function(event) {
+  db = event.target.result;
+  startMonitoring();
+};
+
+// 2. 监控弹幕容器
+function startMonitoring() {
+  // 更通用的容器选择方式
+  const container = findDanmuContainer();
+  if (!container) {
+    console.error('未找到弹幕容器，请手动检查页面结构');
+    return;
+  }
+  
+  console.log('成功找到弹幕容器，开始监控...');
+  
+  // 立即扫描现有弹幕
+  scanExistingDanmus(container);
+  
+  // 设置新弹幕监控
+  const observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+      mutation.addedNodes.forEach(function(node) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          processDanmuElement(node);
+        }
+      });
+    });
+  });
+
+  observer.observe(container, {
+    childList: true,
+    subtree: true
+  });
+}
+
+// 3. 查找弹幕容器
+function findDanmuContainer() {
+  const possibleContainers = [
+    document.querySelector('[data-e2e="chat-message-list"]'),
+    document.querySelector('[class*="message-list"]'),
+    document.querySelector('[class*="chat-container"]'),
+    document.querySelector('div[data-e2e="chat-message"]')?.parentElement
+  ].filter(Boolean);
+  
+  return possibleContainers[0] || document.body;
+}
+
+// 4. 扫描已有弹幕
+function scanExistingDanmus(container) {
+  const danmus = container.querySelectorAll('[data-e2e="chat-message"]');
+  danmus.forEach(processDanmuElement);
+  console.log(`已扫描 ${danmus.length} 条现有弹幕`);
+}
+
+// 5. 处理弹幕元素
+function processDanmuElement(element) {
+  // 排除非弹幕元素
+  if (!element.matches('[data-e2e="chat-message"]') && 
+      !element.querySelector('[data-e2e="chat-message"]')) {
+    return;
+  }
+  
+  const danmu = extractDanmuInfo(element);
+  if (danmu.content) {
+    saveDanmu(danmu);
+  }
+}
+
+// 6. 提取弹幕信息（针对最新结构优化）
+function extractDanmuInfo(element) {
+  // 精确获取弹幕内容元素
+  const contentElem = element.querySelector('.tiktok-1gtnk8w.e1qm5qwc4') || 
+                     element.querySelector('[class*="message-content"]') ||
+                     element.querySelector('[class*="text-container"]');
+  
+  // 精确获取用户名元素
+  const userElem = element.querySelector('[data-e2e="message-owner-name"] .tiktok-as29p3') ||
+                  element.querySelector('[data-e2e="message-owner-name"]') ||
+                  element.querySelector('[class*="user-name"]');
+  
+  return {
+    time: new Date(),
+    username: userElem?.textContent?.trim() || element.getAttribute('title') || '未知用户',
+    content: contentElem?.textContent?.trim() || element.textContent.trim(),
+    html: element.outerHTML // 用于调试
+  };
+}
+
+// 7. 保存到数据库
+function saveDanmu(danmu) {
+  const transaction = db.transaction([storeName], 'readwrite');
+  const store = transaction.objectStore(storeName);
+  
+  // 格式化时间
+  danmu.displayTime = formatTime(danmu.time);
+  
+  store.add(danmu);
+  console.log(`捕获弹幕: ${danmu.displayTime} - 用户:${danmu.username} 内容:${danmu.content}`);
+}
+function getFormattedNow() {
+  const now = new Date();
+  return now.getFullYear() + '-' +
+    String(now.getMonth() + 1).padStart(2, '0') + '-' +
+    String(now.getDate()).padStart(2, '0') + ' ' +
+    String(now.getHours()).padStart(2, '0') + ':' +
+    String(now.getMinutes()).padStart(2, '0') + ':' +
+    String(now.getSeconds()).padStart(2, '0');
+}
+// 8. 导出CSV
+function exportToCSV() {
+  const transaction = db.transaction([storeName], 'readonly');
+  const store = transaction.objectStore(storeName);
+  const request = store.getAll();
+
+  request.onsuccess = function() {
+    let csvContent = "live_id,species,user_id,user_name,gender,time,content\n";
+    
+    request.result.forEach(function(item) {
+      csvContent += `"${dbName}","Beauty","unknown","${item.username.replace(/"/g, '""')}","unknown","${getFormattedNow()}","${item.content.replace(/"/g, '""')}"\n`;
+    });
+
+    downloadCSV(csvContent, `"${dbName}".csv`);
+    console.log(`已导出 ${request.result.length} 条弹幕`);
+  };
+}
+
+// 9. 辅助函数
+function formatTime(date) {
+  const pad = n => n.toString().padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ` +
+         `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function downloadCSV(content, filename) {
+  const blob = new Blob([content], { type: 'text/csv;charset=gbk;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+// 添加导出按钮
+function addExportButton() {
+  const btn = document.createElement('button');
+  btn.textContent = '导出弹幕记录';
+  btn.style.position = 'fixed';
+  btn.style.bottom = '20px';
+  btn.style.right = '20px';
+  btn.style.zIndex = '99999';
+  btn.style.padding = '10px 16px';
+  btn.style.background = '#FE2C55';
+  btn.style.color = 'white';
+  btn.style.borderRadius = '18px';
+  btn.style.fontWeight = 'bold';
+  btn.onclick = exportToCSV;
+  
+  document.body.appendChild(btn);
+}
+
+// 初始化
+addExportButton();
+console.log('弹幕监控已启动，等待捕获弹幕...');
